@@ -1,6 +1,6 @@
 package tflint
 
-deny[msg] {
+deny_banned_user[msg] {
   input.user == "wata727"
   msg := "You are banned"
 }

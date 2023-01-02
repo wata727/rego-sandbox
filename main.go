@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/hashicorp/hcl/v2"
 	"github.com/open-policy-agent/opa/ast"
+	"github.com/open-policy-agent/opa/loader"
 	"github.com/open-policy-agent/opa/rego"
 	"github.com/open-policy-agent/opa/types"
 	"github.com/terraform-linters/tflint-plugin-sdk/hclext"
@@ -134,7 +136,7 @@ func toSchema(in map[string]interface{}) *hclext.BodySchema {
 	return schema
 }
 
-func main() {
+func runQuery(query string, ret *loader.Result) rego.ResultSet {
 	input := struct {
 		User string `json:"user"`
 	}{
@@ -143,10 +145,14 @@ func main() {
 
 	runner := &Runner{}
 
-	q := rego.New(
-		rego.Query(`data.tflint.deny`),
-		rego.Load([]string{"policies"}, nil),
+	store, err := ret.Store()
+	if err != nil {
+		panic(err)
+	}
+
+	regoOpts := []func(*rego.Rego){
 		rego.Input(input),
+		rego.Store(store),
 		rego.Function2(
 			&rego.Function{
 				Name: "terraform.resources",
@@ -180,18 +186,52 @@ func main() {
 				return ast.NewTerm(v), nil
 			},
 		),
-	)
+	}
+
+	for _, m := range ret.ParsedModules() {
+		regoOpts = append(regoOpts, rego.ParsedModule(m))
+	}
+
+	regoOpts = append(regoOpts, rego.Query(query))
+
+	q := rego.New(regoOpts...)
 
 	rs, err := q.Eval(context.Background())
 	if err != nil {
 		panic(err)
 	}
 
-	fmt.Println("\nresult:")
+	return rs
+}
 
-	for _, expr := range rs[0].Expressions {
-		for _, value := range expr.Value.([]interface{}) {
-			fmt.Println(value)
+func main() {
+	ret, err := loader.NewFileLoader().Filtered([]string{"policies"}, nil)
+	if err != nil {
+		panic(err)
+	}
+
+	rules := []string{}
+	for _, m := range ret.ParsedModules() {
+		for _, rule := range m.Rules {
+			rules = append(rules, rule.Head.Name.String())
+		}
+	}
+
+	for _, rule := range rules {
+		if !strings.HasPrefix(rule, "deny_") {
+			continue
+		}
+
+		fmt.Printf("---------- rule: %s----------\n", rule)
+
+		rs := runQuery(fmt.Sprintf("data.tflint.%s", rule), ret)
+
+		fmt.Println("\nresult:")
+
+		for _, expr := range rs[0].Expressions {
+			for _, value := range expr.Value.([]interface{}) {
+				fmt.Println(value)
+			}
 		}
 	}
 }
